@@ -13,7 +13,7 @@ use gpui_component::{
     slider::{SliderEvent, SliderState},
 };
 
-use super::animation::frame_is_due;
+use super::animation::{frame_is_due, frame_wake_delay};
 use super::progress_fraction;
 use crate::player::AudioPlayer;
 use crate::settings::FrameRate;
@@ -37,6 +37,7 @@ pub(super) struct PlaybackProgressView {
     position: Duration,
     next_frame: Option<Instant>,
     frame_pending: bool,
+    frame_wake: Option<Task<()>>,
     window_generation: u64,
     input: ProgressInput,
     seek_preview: Option<Duration>,
@@ -76,6 +77,7 @@ impl PlaybackProgressView {
             position: Duration::ZERO,
             next_frame: None,
             frame_pending: false,
+            frame_wake: None,
             window_generation: 0,
             input: ProgressInput {
                 duration: None,
@@ -119,6 +121,7 @@ impl PlaybackProgressView {
         // 旧窗口的回调不能清除新窗口的 pending 标记，也不能建立第二条帧链。
         self.window_generation = self.window_generation.wrapping_add(1);
         self.frame_pending = false;
+        self.frame_wake = None;
         self.next_frame = None;
         self.sync_slider(window, cx);
         cx.notify();
@@ -143,11 +146,8 @@ impl PlaybackProgressView {
                 this.next_frame = None;
                 return;
             }
-            if frame_is_due(
-                cx.background_executor().now(),
-                this.input.frame_rate,
-                &mut this.next_frame,
-            ) {
+            let now = cx.background_executor().now();
+            if frame_is_due(now, this.input.frame_rate, &mut this.next_frame) {
                 this.position = this
                     .audio
                     .as_deref()
@@ -156,8 +156,34 @@ impl PlaybackProgressView {
                 this.sync_slider(window, cx);
                 cx.notify();
             }
-            this.request_frame(window, cx);
+            // 未到截止点时不再逐显示帧申请，改为在截止点用后台定时器唤醒一次。
+            match frame_wake_delay(now, this.next_frame) {
+                Some(delay) => this.schedule_frame_wake(delay, window, cx),
+                None => this.request_frame(window, cx),
+            }
         });
+    }
+
+    fn schedule_frame_wake(
+        &mut self,
+        delay: Duration,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // 定时器同样占用帧链，避免渲染时又额外申请显示帧造成自旋。
+        self.frame_pending = true;
+        let generation = self.window_generation;
+        self.frame_wake = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update_in(cx, |this, window, cx| {
+                if this.window_generation != generation {
+                    return;
+                }
+                this.frame_pending = false;
+                this.request_frame(window, cx);
+            })
+            .ok();
+        }));
     }
 
     pub(super) fn start_track(

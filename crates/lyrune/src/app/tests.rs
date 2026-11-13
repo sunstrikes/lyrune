@@ -10,7 +10,7 @@ use lyrune_api::{
 };
 
 use super::account::Account;
-use super::animation::frame_is_due;
+use super::animation::{frame_is_due, frame_wake_delay};
 use super::home::HomePageState;
 use super::lyrics::parse_lyrics;
 use super::lyrics_loading::LyricsCache;
@@ -622,6 +622,33 @@ fn limited_frames_follow_one_stable_deadline() {
         &mut next_frame
     ));
     assert_eq!(next_frame, None);
+}
+
+#[test]
+fn limited_frames_wake_on_deadlines_instead_of_display_refresh() {
+    // 120Hz 显示器每秒给出 120 次帧机会；限帧通道只在各自的截止点唤醒。
+    let display_tick = Duration::from_nanos(1_000_000_000 / 120);
+    let mut now = Instant::now();
+    let mut next_frame = None;
+    let mut display_frames = 0;
+    let mut wakes = 0;
+    for _ in 0..120 {
+        now += display_tick;
+        display_frames += 1;
+        if frame_is_due(now, FrameRate::Fps30, &mut next_frame) {
+            wakes += 1;
+        } else {
+            assert!(frame_wake_delay(now, next_frame).is_some_and(|delay| {
+                delay > Duration::ZERO
+                    && delay <= FrameRate::Fps30.frame_interval().expect("限帧有间隔")
+            }));
+        }
+    }
+    assert_eq!(display_frames, 120);
+    assert!(
+        (28..=31).contains(&wakes),
+        "1 秒内 30FPS 应约 30 次唤醒，实际 {wakes}"
+    );
 }
 
 #[test]

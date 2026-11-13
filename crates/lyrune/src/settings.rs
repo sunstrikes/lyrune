@@ -333,8 +333,18 @@ impl Default for AppSettings {
             shuffle: false,
             repeat_mode: RepeatMode::Off,
             lyric_highlight_frame_rate: FrameRate::Fps30,
-            lyric_scroll_frame_rate: FrameRate::Display,
-            progress_frame_rate: FrameRate::Fps60,
+            // macOS 合成器按显示刷新驱动窗口帧，默认不限帧会在 120Hz 屏幕上放大唤醒；
+            // 其他平台保持跟随显示刷新。
+            lyric_scroll_frame_rate: if cfg!(target_os = "macos") {
+                FrameRate::Fps60
+            } else {
+                FrameRate::Display
+            },
+            progress_frame_rate: if cfg!(target_os = "macos") {
+                FrameRate::Fps30
+            } else {
+                FrameRate::Fps60
+            },
             last_library_view: None,
             current_playback: None,
             window_size: None,
@@ -671,6 +681,15 @@ mod tests {
         std::env::temp_dir().join(format!("{prefix}-{}-{name}", std::process::id()))
     }
 
+    fn default_frame_rates() -> (FrameRate, FrameRate) {
+        // macOS 默认跟随显示刷新会在 120Hz 屏幕上放大窗口帧唤醒，因此使用显式上限。
+        if cfg!(target_os = "macos") {
+            (FrameRate::Fps60, FrameRate::Fps30)
+        } else {
+            (FrameRate::Display, FrameRate::Fps60)
+        }
+    }
+
     fn track(mid: &str) -> Track {
         Track {
             song_id: None,
@@ -726,8 +745,9 @@ mod tests {
         assert!(!settings.shuffle);
         assert_eq!(settings.repeat_mode, RepeatMode::Off);
         assert_eq!(settings.lyric_highlight_frame_rate, FrameRate::Fps30);
-        assert_eq!(settings.lyric_scroll_frame_rate, FrameRate::Display);
-        assert_eq!(settings.progress_frame_rate, FrameRate::Fps60);
+        let (scroll_frame_rate, progress_frame_rate) = default_frame_rates();
+        assert_eq!(settings.lyric_scroll_frame_rate, scroll_frame_rate);
+        assert_eq!(settings.progress_frame_rate, progress_frame_rate);
         assert_eq!(settings.last_library_view, None);
         assert_eq!(settings.current_playback, None);
         assert_eq!(settings.window_size, None);
@@ -1120,8 +1140,9 @@ mod tests {
         .expect("deserialize legacy lyric frame rate");
 
         assert_eq!(settings.lyric_highlight_frame_rate, FrameRate::Fps120);
-        assert_eq!(settings.lyric_scroll_frame_rate, FrameRate::Display);
-        assert_eq!(settings.progress_frame_rate, FrameRate::Fps60);
+        let (scroll_frame_rate, progress_frame_rate) = default_frame_rates();
+        assert_eq!(settings.lyric_scroll_frame_rate, scroll_frame_rate);
+        assert_eq!(settings.progress_frame_rate, progress_frame_rate);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::settings::FrameRate;
 
@@ -27,4 +27,12 @@ pub(super) fn frame_is_due(
         now + interval
     });
     true
+}
+
+/// 距限帧截止点还需等待的时长；`None` 表示当前帧就该绘制（不限帧或已到期），
+/// 调用方不应再为这一帧等待定时器。
+pub(super) fn frame_wake_delay(now: Instant, next_frame: Option<Instant>) -> Option<Duration> {
+    next_frame
+        .map(|deadline| deadline.saturating_duration_since(now))
+        .filter(|delay| !delay.is_zero())
 }

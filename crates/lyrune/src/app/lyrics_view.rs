@@ -10,7 +10,7 @@ use gpui_component::{
 };
 
 use super::PLAYER_BAR_HEIGHT;
-use super::animation::frame_is_due;
+use super::animation::{frame_is_due, frame_wake_delay};
 #[cfg(test)]
 use super::lyrics;
 use super::lyrics::{LyricLine, ParsedLyrics};
@@ -949,6 +949,7 @@ pub(super) struct LyricsView {
     pending_lyric_reveal_mid: Option<String>,
     lyric_reveal_frame_pending: bool,
     lyric_animation_frame_pending: bool,
+    lyric_frame_wake: Option<Task<()>>,
     next_lyric_highlight_frame: Option<Instant>,
     next_lyric_scroll_frame: Option<Instant>,
     window_generation: u64,
@@ -991,6 +992,7 @@ impl LyricsView {
             pending_lyric_reveal_mid: None,
             lyric_reveal_frame_pending: false,
             lyric_animation_frame_pending: false,
+            lyric_frame_wake: None,
             next_lyric_highlight_frame: None,
             next_lyric_scroll_frame: None,
             window_generation: 0,
@@ -1029,6 +1031,7 @@ impl LyricsView {
     pub(super) fn attach_window(&mut self, cx: &mut Context<Self>) {
         self.window_generation = self.window_generation.wrapping_add(1);
         self.lyric_animation_frame_pending = false;
+        self.lyric_frame_wake = None;
         self.lyric_reveal_frame_pending = false;
         self.reset_lyric_animation_frames();
         cx.notify();
@@ -1086,11 +1089,57 @@ impl LyricsView {
                 return;
             }
 
-            if this.advance_lyric_frames(cx.background_executor().now(), cx.reduce_motion()) {
+            let now = cx.background_executor().now();
+            let reduce_motion = cx.reduce_motion();
+            if this.advance_lyric_frames(now, reduce_motion) {
                 cx.notify();
             }
-            this.request_lyric_animation_frame(window, cx);
+            // 未到任一通道的截止点时，只等截止点唤醒一次，不再跟随显示刷新自旋。
+            match frame_wake_delay(now, this.lyric_frame_deadline(reduce_motion)) {
+                Some(delay) => this.schedule_lyric_frame_wake(delay, window, cx),
+                None => this.request_lyric_animation_frame(window, cx),
+            }
         });
+    }
+
+    /// 距离最近一次限帧截止点的等待；`None` 表示本次该跟随显示刷新。
+    fn lyric_frame_deadline(&self, reduce_motion: bool) -> Option<Instant> {
+        let motion_active = self.lyric_motion_is_active(reduce_motion);
+        // 不限帧的通道每显示帧都要采样，不能等另一条通道的截止点。
+        if self.input.highlight_frame_rate.frame_interval().is_none()
+            || (motion_active && self.input.scroll_frame_rate.frame_interval().is_none())
+        {
+            return None;
+        }
+        match (
+            self.next_lyric_highlight_frame,
+            self.next_lyric_scroll_frame,
+        ) {
+            (Some(highlight), Some(scroll)) if motion_active => Some(highlight.min(scroll)),
+            (highlight, _) => highlight,
+        }
+    }
+
+    fn schedule_lyric_frame_wake(
+        &mut self,
+        delay: Duration,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // 定时器同样占用帧链，避免渲染时又额外申请显示帧造成自旋。
+        self.lyric_animation_frame_pending = true;
+        let generation = self.window_generation;
+        self.lyric_frame_wake = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update_in(cx, |this, window, cx| {
+                if this.window_generation != generation {
+                    return;
+                }
+                this.lyric_animation_frame_pending = false;
+                this.request_lyric_animation_frame(window, cx);
+            })
+            .ok();
+        }));
     }
 
     fn advance_lyric_frames(&mut self, now: Instant, reduce_motion: bool) -> bool {
@@ -1936,5 +1985,83 @@ mod tests {
                 assert_eq!(cache.scroll_anchor, 0.);
             });
         });
+    }
+
+    #[gpui::test]
+    fn test_lyric_frames_wake_on_deadline(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|_, _| LyricsView::new(None, font(".SystemUIFont")));
+        view.update(cx, |view, _| {
+            view.input.mid = "test".into();
+            view.input.content = LyricsContent::Ready(Arc::new(lyrics::parse_lyrics(
+                "[00:00.00]第一行\n[00:03.00]第二行\n[00:06.00]第三行",
+                None,
+                None,
+            )));
+            view.input.duration = Some(Duration::from_secs(30));
+            view.input.visible = true;
+            view.input.advancing = true;
+            view.input.highlight_frame_rate = FrameRate::Fps30;
+            view.input.scroll_frame_rate = FrameRate::Fps60;
+            view.position = Duration::from_secs(1);
+        });
+        // 首帧渲染建立限帧帧链。
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        // 逐显示帧推进 1 秒模拟 120Hz 屏幕；统计真正请求到的显示帧。
+        let display_tick = Duration::from_nanos(1_000_000_000 / 120);
+        let mut wakes = 0;
+        for _ in 0..120 {
+            cx.cx.executor().advance_clock(display_tick);
+            cx.run_until_parked();
+            wakes += cx.update(|window, cx| window.simulate_next_frame(cx));
+        }
+        assert!(
+            (25..=35).contains(&wakes),
+            "120Hz 显示下 30FPS 歌词应约 30 次唤醒，实际 {wakes}"
+        );
+
+        // 测试窗口没有封面，根视图不会渲染歌词面板；手动渲染以复现展开歌词的绘制时机。
+        let render_panel = |cx: &mut VisualTestContext, view: &gpui::Entity<LyricsView>| {
+            cx.update(|window, cx| {
+                view.update(cx, |view, cx| {
+                    let _ = view.render_lyrics_panel("test", white(), false, false, window, cx);
+                });
+            });
+        };
+
+        // 滚动动画期间按更快的滚动截止点唤醒（Fps60），动画结束后回落到高亮帧率。
+        render_panel(cx, &view);
+        view.update(cx, |view, _| view.position = Duration::from_secs(4));
+        render_panel(cx, &view);
+        let mut scrolling_wakes = 0;
+        for _ in 0..60 {
+            cx.cx.executor().advance_clock(display_tick);
+            cx.run_until_parked();
+            scrolling_wakes += cx.update(|window, cx| window.simulate_next_frame(cx));
+            render_panel(cx, &view);
+        }
+        assert!(
+            (16..=40).contains(&scrolling_wakes),
+            "滚动动画期间应按 Fps60 唤醒，实际 {scrolling_wakes}"
+        );
+
+        // 暂停后帧链必须自行结束。
+        view.update(cx, |view, _| view.input.advancing = false);
+        for _ in 0..10 {
+            cx.cx.executor().advance_clock(display_tick);
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+        }
+        let mut paused_wakes = 0;
+        for _ in 0..120 {
+            cx.cx.executor().advance_clock(display_tick);
+            cx.run_until_parked();
+            paused_wakes += cx.update(|window, cx| window.simulate_next_frame(cx));
+        }
+        assert_eq!(paused_wakes, 0, "暂停后不应继续唤醒歌词帧");
     }
 }
