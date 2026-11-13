@@ -105,6 +105,9 @@ impl PlaybackProgressView {
         let changed = self.input != input;
         if self.input.frame_rate != input.frame_rate || self.input.advancing != input.advancing {
             self.next_frame = None;
+            // 取消挂起的截止点定时器，避免按旧帧率或暂停前的截止点多唤醒一次。
+            self.frame_wake = None;
+            self.frame_pending = false;
         }
         self.input = input;
         // 播放中的位置仅由本控件的帧调度采样，其他视图重绘不能绕过帧率限制。

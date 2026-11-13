@@ -29,6 +29,8 @@ GPUI 的渲染器每帧重绘整个窗口。上游 Linux 后端已接入场景�
 | 整秒主线程耗时（demand） | 2501 µs | 1052 µs |
 | 暂停后 120 个显示帧内唤醒 | 120 | 0 |
 
+输入变化（切歌、可见性、帧率、暂停）会取消挂起的截止点定时器，避免按旧截止点多唤醒一次；事件循环线程只做一次状态重置，不再申请显示帧。定时器由视图持有，`attach_window` 重建帧链时 drop 即取消。
+
 注意：新默认值只对没有持久化帧率字段的配置生效。已有 `settings.json` 会保留用户此前的显式值，可在设置页的“动画帧率”里改成新默认。
 
 ## 2. 渲染层：Metal 局部重绘
@@ -44,10 +46,10 @@ GPUI fork 新增 macOS 后端对 `SceneDamage` 的消费：
 
 正确性与性能证据（离屏 Metal，`crates/gpui_apple/src/damage_tests.rs` / `damage_bench.rs`）：
 
-- 18 个逐像素等价测试：先全量渲染 A，再按 damage 增量渲染 B，与独立全量渲染 B 逐像素 RGBA 比较，差异像素数必须为 0；覆盖 Rects / Unchanged / resize 失效 / 透明窗口 alpha / path / 连续 10 帧增量。
+- 18 个局部重绘测试，其中 12 个用逐像素等价断言：先全量渲染 A，再按 damage 增量渲染 B，与独立全量渲染 B 逐像素 RGBA 比较，差异像素数必须为 0；其余覆盖区域规划、合并上限与边界裁剪。用例覆盖 Rects / Unchanged / resize 失效 / 透明窗口 alpha / path / 连续 10 帧增量。
 - bench（2400×1600 设备像素，1000 sprites + 3 paths，31 样本 × 2 轮合并的中位数）：全量 0.496 ms → 1 个脏矩形 0.059 ms（8.5×）、2 个 0.111 ms（4.5×）；未变化帧 0.053 ms（不取 drawable）。bench 的脏区只有窗口的 0.036%–0.071%，真实歌词帧的脏区更大，真机收益低于 8.5×。
 
-真机端到端（同一首歌、同一窗口、前台播放 + 全屏歌词页、固定帧率配置，100 Hz 显示器，`ioreg` 整机 GPU 利用率，每轮 15–30 个 1 秒样本）：
+真机端到端（同一首歌、同一窗口、前台播放 + 全屏歌词页、固定帧率配置，100 Hz 显示器，`ioreg` 整机 GPU 利用率，每轮 15–30 个 1 秒样本）。P0-only 隔离版本的做法：复制工作区 → `git checkout -- Cargo.toml Cargo.lock` 恢复旧 GPUI pin → 用独立 `CARGO_TARGET_DIR` 构建 release；这样只含应用层改动，用来把 P0 与 P1 的贡献分开。
 
 | 版本 | GPU Device Utilization 中位/均值 | 进程 CPU 均值 | RSS 中位 |
 | --- | --- | --- | --- |
@@ -55,13 +57,13 @@ GPUI fork 新增 macOS 后端对 `SceneDamage` 的消费：
 | 仅 P0（应用层） | 25.0% / 25.3% | 11.9% | 170.7 MB |
 | P0 + P1 | 19.0% / 18.8% | 13.5% | 171.0 MB |
 
-结论：GPU 收益来自 P1（约 -24%）；P0 不改变 GPU（出帧数不变，省的是唤醒），符合预期。CPU 侧 P1 有约 +1.6pp 的成本（多一次 present pass 与整场景 instance 编码），见已知问题。`ioreg` 的 Device Utilization 是整机 GPU（含 WindowServer 与其他后台负载）；无 App 的底噪轮因其他进程的 GPU 突发不可靠，因此未做底噪扣除，只保证三轮环境与 loadavg 同量级（2.2–2.9）。P0-only 的另一轮在构建刚结束、loadavg 3.2 时采到 GPU 32.8%，重采后与基线一致，属于噪声样本，不引用。
+结论：GPU 收益来自 P1（约 -24%）；P0 不改变 GPU（出帧数不变，省的是唤醒），符合预期。CPU 侧：P0-only 比基线高约 0.5pp，最终候选比 P0-only 再高约 1.5pp，因此 P1 的 CPU 成本估计在 +1.5pp 左右，但 P0-only 与基线之间的 0.5pp 也可能是噪声或 P0 实现开销，归因不精确；方向是明确的 P1 trade-off，见已知问题。`ioreg` 的 Device Utilization 是整机 GPU（含 WindowServer 与其他后台负载）；无 App 的底噪轮因其他进程的 GPU 突发不可靠，因此未做底噪扣除，只保证三轮环境与 loadavg 同量级（2.2–2.9）。P0-only 的另一轮在构建刚结束、loadavg 3.2 时采到 GPU 32.8%，重采后与基线一致，属于噪声样本，不引用。
 
 降级开关（无需重新编译）：`GPUI_EXPERIMENTAL_PARTIAL_RENDER=0` 关闭局部重绘（Metal 后端退回直绘全量路径），`GPUI_EXPERIMENTAL_PRESENT_SKIP=0` 关闭未变化帧跳过。
 
 ## 3. 绘制层：为什么没有改
 
-对稳态展开的歌词页做插桩计数（13 行可见、2× 缩放）：410 个 glyph、22 个 layout/layer 批次，paint 约 11.5–14.1 µs/帧（60 FPS 下约 0.7–0.9 ms/秒），面板缓存命中时 prepaint 约 0.5 µs。glyph 数量已接近必要绘制；`scale == 1` 免逐 glyph 变换在 GPUI 里是 no-op（`paint_glyph` 本就走单位矩阵的 `paint_glyph_with_transformation`）；合并 layer/fragment 的收益低于 5% 且有绘制顺序风险。因此本层不做改动，性能收益来自减少帧数与减少重绘面积。
+对稳态展开的歌词页做临时插桩计数（改完即移除，方法是在 `paint_layout` 里累计 glyph 数与耗时并对固定合成歌词取中位数；13 行可见、2× 缩放）：410 个 glyph、22 个 layout/layer 批次，paint 约 11.5–14.1 µs/帧（60 FPS 下约 0.7–0.9 ms/秒），面板缓存命中时 prepaint 约 0.5 µs。独立验证者用同一合成歌词复测的基线与候选均为 15 µs，佐证该量级。glyph 数量已接近必要绘制；`scale == 1` 免逐 glyph 变换在 GPUI 里是 no-op（`paint_glyph` 本就走单位矩阵的 `paint_glyph_with_transformation`）；合并 layer/fragment 的收益低于 5% 且有绘制顺序风险。因此本层不做改动，性能收益来自减少帧数与减少重绘面积。
 
 ## 已知问题与限制
 

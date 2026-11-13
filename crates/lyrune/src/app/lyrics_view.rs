@@ -1016,9 +1016,13 @@ impl LyricsView {
         let position_changed = self.position != position && !input.advancing;
         if position_changed
             || self.input.visible != input.visible
+            || self.input.advancing != input.advancing
             || self.input.highlight_frame_rate != input.highlight_frame_rate
             || self.input.scroll_frame_rate != input.scroll_frame_rate
         {
+            // 取消挂起的截止点定时器，避免按旧的截止点或暂停前的状态多唤醒一次。
+            self.lyric_frame_wake = None;
+            self.lyric_animation_frame_pending = false;
             self.reset_lyric_animation_frames();
         }
         let changed = self.input != input;
