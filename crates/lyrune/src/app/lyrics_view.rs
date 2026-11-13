@@ -949,6 +949,7 @@ pub(super) struct LyricsView {
     pending_lyric_reveal_mid: Option<String>,
     lyric_reveal_frame_pending: bool,
     lyric_animation_frame_pending: bool,
+    // 仅作为定时器任务的持有者：重建帧链时 drop 它即可取消尚未触发的唤醒。
     lyric_frame_wake: Option<Task<()>>,
     next_lyric_highlight_frame: Option<Instant>,
     next_lyric_scroll_frame: Option<Instant>,

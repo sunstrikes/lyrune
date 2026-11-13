@@ -630,11 +630,9 @@ fn limited_frames_wake_on_deadlines_instead_of_display_refresh() {
     let display_tick = Duration::from_nanos(1_000_000_000 / 120);
     let mut now = Instant::now();
     let mut next_frame = None;
-    let mut display_frames = 0;
     let mut wakes = 0;
     for _ in 0..120 {
         now += display_tick;
-        display_frames += 1;
         if frame_is_due(now, FrameRate::Fps30, &mut next_frame) {
             wakes += 1;
         } else {
@@ -644,7 +642,6 @@ fn limited_frames_wake_on_deadlines_instead_of_display_refresh() {
             }));
         }
     }
-    assert_eq!(display_frames, 120);
     assert!(
         (28..=31).contains(&wakes),
         "1 秒内 30FPS 应约 30 次唤醒，实际 {wakes}"

@@ -37,6 +37,7 @@ pub(super) struct PlaybackProgressView {
     position: Duration,
     next_frame: Option<Instant>,
     frame_pending: bool,
+    // 仅作为定时器任务的持有者：重建帧链时 drop 它即可取消尚未触发的唤醒。
     frame_wake: Option<Task<()>>,
     window_generation: u64,
     input: ProgressInput,
