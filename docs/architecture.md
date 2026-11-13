@@ -34,9 +34,9 @@
 
 ### GPUI 依赖
 
-`gpui-base` / `gpui-component` 固定为官方 0.7.3，底层使用 `gpui-pre 0.3.9`。根 `Cargo.toml` 将相关 GPUI 包统一指向 `amtoaer/zed@b53d2343`，避免应用与组件各自使用不同来源的实体、窗口和绘制类型。
+`gpui-base` / `gpui-component` 固定为官方 0.8.0，底层使用 `gpui-pre 0.3.9`。根 `Cargo.toml` 将相关 GPUI 包统一指向 `sunstrikes/zed@2ea3ae24`（`amtoaer/zed@a3e63a18` 之上增加 macOS Metal 局部重绘的提交），避免应用与组件各自使用不同来源的实体、窗口和绘制类型。
 
-该依赖分支从官方快照 `93d74566` 迁移 Lyrune 的局部重绘、动态非活动帧率、字形变换和可变字体补丁，再通过组件仓库的官方导出脚本生成独立工作区；原 Wayland 帧循环补丁已被上游包含。补丁及生成方式记录在依赖仓库的 [LYRUNE-GPUI.md](https://github.com/amtoaer/zed/blob/b53d2343e5b238ca090fa321187180d3e37f7d7c/LYRUNE-GPUI.md)。升级时需一并检查这些补丁，不能仅替换组件版本。
+该依赖分支从官方快照 `93d74566` 迁移 Lyrune 的局部重绘、动态非活动帧率、字形变换和可变字体补丁，再通过组件仓库的官方导出脚本生成独立工作区；原 Wayland 帧循环补丁已被上游包含。现在 Linux/WGPU 与 macOS/Metal 后端都消费 `SceneDamage`，只重绘损坏矩形；macOS 的验证数据与已知问题见 [macos-performance.md](macos-performance.md)。补丁及生成方式记录在依赖仓库的 [LYRUNE-GPUI.md](https://github.com/sunstrikes/zed/blob/2ea3ae243013d0a5698b13462a84dfd3c98a79d5/LYRUNE-GPUI.md)。升级时需一并检查这些补丁，不能仅替换组件版本。
 
 ### 工作区与协议库
 
@@ -154,7 +154,7 @@ MPRIS 在音源加载期间沿用 `Playing` 状态；它与 `PlaybackState::is_a
 - **补页失败保留已有结果。** 搜索的各类别可以同时补页，某类别成功不能清除其他类别的错误；歌手的歌曲、专辑各自结束加载并保留各自的错误。首次搜索成功会清除原搜索错误，歌手请求则在启动前清除对应错误，这些时机不同。请求前的检查还涉及历史页面的可见数量和通知，继续留在页面方法内。
 - **分页可被两个用途共享。** 页面补页和播放队列补全通过 `SingleFlight` 共享同一账号、歌单、offset 的请求。资源只追加期望的下一页，避免重复回填。队列切换后，旧任务仍可能补全自己持有的页面资源，但不能覆盖新队列。
 - **失效与取消是两件事。** 登录、音乐库、首页、队列和音源加载分别使用版本计数器。它们拒绝晚到的结果，并不会自动终止网络请求。凭据刷新还比较会话身份，防止同一账号的旧会话影响新会话。
-- **显示帧与后台 tick 的寿命不同。** 进度控件按 `progress_frame_rate` 采样音频位置（旧配置默认 60 FPS），与当前页面、歌词是否展开无关；其他视图重绘不能绕过该帧率。窗口关闭后应用 tick 仍处理曲终与保存，暂停时等待通道唤醒。窗口重开通过 `attach_window` 重建显示帧链。
+- **显示帧与后台 tick 的寿命不同。** 进度控件按 `progress_frame_rate` 采样音频位置（默认 macOS 30 FPS、其他平台 60 FPS），与当前页面、歌词是否展开无关；其他视图重绘不能绕过该帧率。限帧的歌词与进度帧链在未到截止点时由后台定时器唤醒，不再逐显示帧申请帧，所以 30 FPS 目标在 100/120 Hz 屏幕上只有约 30 次/秒唤醒；到期的帧仍由 `on_next_frame` 采样，`frame_is_due` 的 deadline 累加语义不变。窗口关闭后应用 tick 仍处理曲终与保存，暂停时等待通道唤醒。窗口重开通过 `attach_window` 重建显示帧链。
 - **拖动预览只属于进度控件。** 松手前，滑块和时间提示显示临时位置，歌词与后台进度继续跟随实际音频时钟；松手后才发出 `SeekTo`。
 - **歌词有多层缓存。** 原始磁盘缓存、已解析内容、排版结果和当前帧面板各自解决不同问题。已有歌词正在播放时，网络刷新得到的不同内容先进入 `lyrics.pending`，以后选中该曲时采用，避免本次播放中时间轴突然变化。
 - **歌词时间和排版不能按字符数简化。** 字范围是 UTF-8 字节下标；没有字级计时的标点和尾部文字借用相邻时间段。QRC 的严格与宽松解析都覆盖真实格式差异，现有测试包含未转义属性和截断输入。
@@ -168,6 +168,8 @@ MPRIS 在音源加载期间沿用 `Playing` 状态；它与 `PlaybackState::is_a
 | --- | --- |
 | 歌词收起时的首帧 | Linux release 隔离窗口中，稳定动画帧较轻，但每次从完整歌词页收起的首帧仍出现约 33～55ms 的 CPU 绘制耗时，主要在 prepaint。普通页面此时重新进入渲染树；还需调用栈采样确定具体成本，不能据此声称已消除所有卡顿。 |
 | `lyrics_loading::ensure_track_lyrics` 的异常收尾 | 磁盘旧内容已采用后，若后台任务异常结束而未发送 Network，收尾可能留下该歌曲的 loading 标记。该标记仅在内存中，重启后清除；需要受控异常复现，再决定恢复行为。 |
+| macOS 局部重绘的 CPU 成本 | 固定配置真机测量：GPU 利用率中位 25%→19%（-24%），进程 CPU 11.2–11.4%→13.5%（+1.6pp）。P0-only 隔离实验表明 P0 本身不增加 GPU、CPU 差异在噪声内，成本来自 P1 的整场景 instance 编码与额外 present pass；后续应优先做增量编码或跳过呈现，见 [macos-performance.md](macos-performance.md)。 |
+| `gpui-pre` 的 `SceneDamage::between` 少报 | 快照自带的 property test 会偶发失败（Linux/WGPU 同样使用该 diff），观测到 path 合成边缘 1 LSB 差异。契约要求永不漏报，需要按后端 batch 分组语义重建 diff 模型；需要完全规避时用 `GPUI_EXPERIMENTAL_PARTIAL_RENDER=0`。 |
 | `AudioCache::prepare_for_seek` | 仅在测试中使用，覆盖跳转 Range 请求且不发送 HEAD 的路径；删除前需要替代这项覆盖，并重新判断 `validate_remote` 的用途。 |
 
 ## 验证
