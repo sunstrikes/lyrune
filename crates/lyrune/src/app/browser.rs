@@ -626,7 +626,12 @@ mod tests {
         assert_eq!(browser.read_with(cx, |view, _| view.render_count), before);
         let bounds = input.read_with(cx, |input, _| input.input_bounds());
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-        cx.simulate_keystrokes("ctrl-a");
+        // 全选快捷键随平台不同，macOS 的 ctrl-a 是“移到行首”。
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-a"
+        } else {
+            "ctrl-a"
+        });
         cx.simulate_input("typed");
         assert_eq!(input.read_with(cx, |input, _| input.value()), "typed");
 

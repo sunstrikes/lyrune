@@ -1509,6 +1509,15 @@ mod tests {
     use crate::design::{AppFonts, ColorTheme};
     use crate::settings::AppSettings;
 
+    // 全选快捷键随平台不同：测试原先固定用 Linux 的 ctrl-a，macOS 上会变成“移到行首”。
+    fn select_all_keystrokes() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "cmd-a"
+        } else {
+            "ctrl-a"
+        }
+    }
+
     struct TestSettingsPage {
         page: Entity<SettingsPage>,
     }
@@ -1621,7 +1630,7 @@ mod tests {
             assert_eq!(*actions.borrow(), vec![initial + step, initial]);
         }
         actions.borrow_mut().clear();
-        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_keystrokes(select_all_keystrokes());
         cx.simulate_input("150");
         assert!(actions.borrow().is_empty());
         cx.simulate_keystrokes("enter");
@@ -1704,12 +1713,12 @@ mod tests {
             assert_eq!(actions.borrow().last(), Some(&expected));
         }
         actions.borrow_mut().clear();
-        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_keystrokes(select_all_keystrokes());
         cx.simulate_input("3");
         assert!(actions.borrow().is_empty());
         cx.simulate_keystrokes("enter");
         assert_eq!(actions.borrow().last(), Some(&(45, 0.13, 4.1, 3)));
-        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_keystrokes(select_all_keystrokes());
         cx.simulate_input("6");
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let min_overlay = page.read_with(cx, |page, cx| {
@@ -1723,7 +1732,7 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.run_until_parked();
         assert_eq!(actions.borrow().last(), Some(&(45, 0.13, 4.1, 6)));
-        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_keystrokes(select_all_keystrokes());
         cx.simulate_input("0");
         cx.simulate_keystrokes("enter");
         assert_eq!(actions.borrow().last(), Some(&(0, 0.13, 4.1, 6)));
